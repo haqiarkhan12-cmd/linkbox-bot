@@ -1,265 +1,278 @@
+import asyncio
 import os
-import socket
-import ipaddress
+import re
+import shutil
 from urllib.parse import urlparse
 
-import aiohttp
+import yt_dlp
 
-from config import MAX_FILE_SIZE, DOWNLOAD_DIR
+from config import DOWNLOAD_DIR, MAX_FILE_SIZE
 
 
-# =========================
-# DOWNLOAD DIRECTORY
-# =========================
+# ============================================================
+# DIRECTORIES
+# ============================================================
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 
-# =========================
-# URL SECURITY
-# =========================
+# ============================================================
+# SUPPORTED URL CHECK
+# ============================================================
 
-def validate_url(url: str):
+def is_supported_url(url: str) -> bool:
+    """
+    Basic URL validation.
+    yt-dlp determines whether the platform itself is supported.
+    """
 
     try:
         parsed = urlparse(url)
 
-        if parsed.scheme not in ("http", "https"):
-            return False, "Only HTTP and HTTPS links are supported."
-
-        if not parsed.hostname:
-            return False, "Invalid URL."
-
-        hostname = parsed.hostname.lower()
-
-        # Block localhost names
-        blocked_names = {
-            "localhost",
-            "localhost.localdomain",
-            "0.0.0.0",
-            "127.0.0.1",
-        }
-
-        if hostname in blocked_names:
-            return False, "This URL is not allowed."
-
-        # Resolve hostname and block private/reserved IPs
-        try:
-            addresses = socket.getaddrinfo(
-                hostname,
-                None,
-                type=socket.SOCK_STREAM
-            )
-
-            for address in addresses:
-
-                ip = address[4][0]
-                ip_obj = ipaddress.ip_address(ip)
-
-                if (
-                    ip_obj.is_private
-                    or ip_obj.is_loopback
-                    or ip_obj.is_link_local
-                    or ip_obj.is_reserved
-                    or ip_obj.is_multicast
-                ):
-                    return False, "Private or restricted addresses are not allowed."
-
-        except socket.gaierror:
-            return False, "Could not resolve the host."
-
-        return True, None
+        return (
+            parsed.scheme in ("http", "https")
+            and bool(parsed.netloc)
+        )
 
     except Exception:
-        return False, "Invalid URL."
+        return False
 
 
-# =========================
+# ============================================================
 # SAFE FILENAME
-# =========================
+# ============================================================
 
-def safe_filename(filename):
+def safe_filename(filename: str) -> str:
 
-    if not filename:
-        filename = "downloaded_file"
+    filename = filename or "video"
 
-    filename = os.path.basename(filename)
-
-    allowed = (
-        "abcdefghijklmnopqrstuvwxyz"
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-        "0123456789"
-        "._- "
-    )
-
-    filename = "".join(
-        char if char in allowed else "_"
-        for char in filename
+    filename = re.sub(
+        r'[\\/:*?"<>|]+',
+        "_",
+        filename
     )
 
     filename = filename.strip()
 
     if not filename:
-        filename = "downloaded_file"
+        filename = "video"
 
     return filename[:150]
 
 
-# =========================
-# DOWNLOAD FILE
-# =========================
+# ============================================================
+# GET MEDIA INFORMATION
+# ============================================================
 
-async def download_file(url, user_id):
+async def get_media_info(url: str):
 
-    valid, error = validate_url(url)
+    if not is_supported_url(url):
+        raise ValueError(
+            "Invalid video URL."
+        )
 
-    if not valid:
-        raise ValueError(error)
+    def extract():
+
+        options = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "noplaylist": True,
+        }
+
+        with yt_dlp.YoutubeDL(options) as ydl:
+
+            return ydl.extract_info(
+                url,
+                download=False
+            )
+
+    return await asyncio.to_thread(
+        extract
+    )
+
+
+# ============================================================
+# DOWNLOAD MEDIA
+# ============================================================
+
+async def download_media(
+    url: str,
+    user_id: int,
+    quality: str = "720"
+):
+
+    if not is_supported_url(url):
+
+        raise ValueError(
+            "Invalid video URL."
+        )
 
     user_folder = os.path.join(
         DOWNLOAD_DIR,
         str(user_id)
     )
 
-    os.makedirs(user_folder, exist_ok=True)
-
-    timeout = aiohttp.ClientTimeout(
-        total=300,
-        connect=20,
-        sock_read=60
+    os.makedirs(
+        user_folder,
+        exist_ok=True
     )
 
-    headers = {
-        "User-Agent": "LinkBoxBot/1.0"
+    output_template = os.path.join(
+        user_folder,
+        "%(title)s.%(ext)s"
+    )
+
+    if quality == "360":
+
+        format_selector = (
+            "bestvideo[height<=360]+bestaudio/"
+            "best[height<=360]/best"
+        )
+
+    elif quality == "720":
+
+        format_selector = (
+            "bestvideo[height<=720]+bestaudio/"
+            "best[height<=720]/best"
+        )
+
+    elif quality == "1080":
+
+        format_selector = (
+            "bestvideo[height<=1080]+bestaudio/"
+            "best[height<=1080]/best"
+        )
+
+    else:
+
+        format_selector = (
+            "bestvideo+bestaudio/best"
+        )
+
+    options = {
+        "format": format_selector,
+        "outtmpl": output_template,
+        "merge_output_format": "mp4",
+
+        "noplaylist": True,
+
+        "quiet": True,
+        "no_warnings": True,
+
+        "restrictfilenames": True,
+
+        "max_filesize": MAX_FILE_SIZE,
+
+        "socket_timeout": 30,
+
+        "retries": 2,
+
     }
 
-    async with aiohttp.ClientSession(
-        timeout=timeout,
-        headers=headers
-    ) as session:
+    def download():
 
-        async with session.get(
-            url,
-            allow_redirects=True,
-            max_redirects=5
-        ) as response:
+        with yt_dlp.YoutubeDL(options) as ydl:
 
-            if response.status != 200:
-                raise ValueError(
-                    f"Server returned HTTP {response.status}."
-                )
-
-            # Check Content-Length if available
-            content_length = response.headers.get(
-                "Content-Length"
+            info = ydl.extract_info(
+                url,
+                download=True
             )
 
-            if content_length:
-
-                try:
-                    size = int(content_length)
-
-                    if size > MAX_FILE_SIZE:
-                        raise ValueError(
-                            "File is larger than the allowed limit."
-                        )
-
-                except ValueError as exc:
-
-                    if "larger" in str(exc):
-                        raise
-
-            # Filename
-            content_disposition = response.headers.get(
-                "Content-Disposition",
-                ""
+            filename = ydl.prepare_filename(
+                info
             )
 
-            filename = None
-
-            if "filename=" in content_disposition:
-
-                filename = (
-                    content_disposition
-                    .split("filename=", 1)[1]
-                    .strip()
-                    .strip('"')
-                    .strip("'")
-                )
-
-            if not filename:
-
-                path = urlparse(str(response.url)).path
-
-                filename = os.path.basename(path)
-
-            filename = safe_filename(filename)
-
-            file_path = os.path.join(
-                user_folder,
+            base, _ = os.path.splitext(
                 filename
             )
 
-            # Avoid overwriting files
-            base, extension = os.path.splitext(
-                file_path
-            )
+            possible_files = [
+                filename,
+                base + ".mp4",
+                base + ".mkv",
+                base + ".webm",
+                base + ".mov",
+            ]
 
-            counter = 1
+            final_file = None
 
-            while os.path.exists(file_path):
+            for path in possible_files:
 
-                file_path = (
-                    f"{base}_{counter}{extension}"
+                if os.path.exists(path):
+
+                    final_file = path
+                    break
+
+            if not final_file:
+
+                raise FileNotFoundError(
+                    "Downloaded file was not found."
                 )
 
-                counter += 1
+            return {
+                "path": final_file,
+                "filename": os.path.basename(
+                    final_file
+                ),
+                "size": os.path.getsize(
+                    final_file
+                ),
+                "title": info.get(
+                    "title",
+                    "Video"
+                ),
+                "duration": info.get(
+                    "duration"
+                ),
+                "uploader": info.get(
+                    "uploader"
+                ),
+            }
 
-            # Download in chunks
-            downloaded = 0
-
-            with open(file_path, "wb") as file:
-
-                async for chunk in response.content.iter_chunked(
-                    64 * 1024
-                ):
-
-                    downloaded += len(chunk)
-
-                    if downloaded > MAX_FILE_SIZE:
-
-                        file.close()
-
-                        try:
-                            os.remove(file_path)
-                        except OSError:
-                            pass
-
-                        raise ValueError(
-                            "File exceeded the maximum allowed size."
-                        )
-
-                    file.write(chunk)
-
-    return {
-        "path": file_path,
-        "filename": os.path.basename(file_path),
-        "size": downloaded
-    }
+    return await asyncio.to_thread(
+        download
+    )
 
 
-# =========================
+# ============================================================
 # DELETE FILE
-# =========================
+# ============================================================
 
 def delete_file(file_path):
 
     try:
 
         if os.path.exists(file_path):
+
             os.remove(file_path)
 
         return True
 
-    except OSError:
+    except Exception:
+
+        return False
+
+
+# ============================================================
+# DELETE USER FOLDER
+# ============================================================
+
+def delete_user_folder(user_id):
+
+    folder = os.path.join(
+        DOWNLOAD_DIR,
+        str(user_id)
+    )
+
+    try:
+
+        if os.path.exists(folder):
+
+            shutil.rmtree(folder)
+
+        return True
+
+    except Exception:
+
         return False
