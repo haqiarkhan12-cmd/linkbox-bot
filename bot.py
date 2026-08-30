@@ -19,7 +19,6 @@ from config import BOT_TOKEN, ADMIN_ID
 from database import (
     init_db,
     add_user,
-    get_user,
     is_banned,
     add_download,
     update_download,
@@ -27,10 +26,13 @@ from database import (
     get_user_downloads,
     get_statistics,
     set_banned,
-    set_premium,
 )
 
-from downloader import download_file, delete_file
+from downloader import (
+    get_media_info,
+    download_media,
+    delete_file,
+)
 
 
 # ============================================================
@@ -46,7 +48,7 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================
-# MAIN MENU
+# MENUS
 # ============================================================
 
 def main_menu():
@@ -54,7 +56,7 @@ def main_menu():
     keyboard = [
         [
             InlineKeyboardButton(
-                "📥 Download",
+                "📥 Download Video",
                 callback_data="download",
             )
         ],
@@ -83,9 +85,29 @@ def main_menu():
     return InlineKeyboardMarkup(keyboard)
 
 
-# ============================================================
-# ADMIN MENU
-# ============================================================
+def quality_menu():
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "🎬 360p",
+                callback_data="quality_360",
+            ),
+            InlineKeyboardButton(
+                "🎬 720p",
+                callback_data="quality_720",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "🎬 1080p",
+                callback_data="quality_1080",
+            ),
+        ],
+    ]
+
+    return InlineKeyboardMarkup(keyboard)
+
 
 def admin_menu():
 
@@ -104,12 +126,6 @@ def admin_menu():
         ],
         [
             InlineKeyboardButton(
-                "💎 Premium",
-                callback_data="admin_premium",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
                 "🚫 Ban User",
                 callback_data="admin_ban",
             ),
@@ -124,12 +140,32 @@ def admin_menu():
 
 
 # ============================================================
-# ADMIN CHECK
+# ADMIN
 # ============================================================
 
 def is_admin(user_id):
 
     return user_id == ADMIN_ID
+
+
+async def admin(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    if not is_admin(update.effective_user.id):
+
+        await update.message.reply_text(
+            "⛔ Access denied."
+        )
+
+        return
+
+    await update.message.reply_text(
+        "👑 *LinkBox Admin Panel*",
+        reply_markup=admin_menu(),
+        parse_mode="Markdown",
+    )
 
 
 # ============================================================
@@ -153,44 +189,12 @@ async def start(
 
         return
 
-    text = (
+    await update.message.reply_text(
         "📦 *Welcome to LinkBox* 🤖\n\n"
-        "ستاسو هوښیار Link & File Assistant.\n\n"
-        "🔗 خپل عامه او اجازه‌لرونکی فایل لینک "
-        "راولېږئ.\n\n"
-        "👇 له لاندې Menu څخه انتخاب وکړئ."
-    )
-
-    await update.message.reply_text(
-        text,
+        "🔗 د ویډیو لینک راولېږئ.\n\n"
+        "LinkBox به د موجودو معلوماتو او "
+        "کیفیتونو په اړه درته انتخاب درکړي.",
         reply_markup=main_menu(),
-        parse_mode="Markdown",
-    )
-
-
-# ============================================================
-# ADMIN COMMAND
-# ============================================================
-
-async def admin(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-):
-
-    user = update.effective_user
-
-    if not is_admin(user.id):
-
-        await update.message.reply_text(
-            "⛔ Access denied."
-        )
-
-        return
-
-    await update.message.reply_text(
-        "👑 *LinkBox Admin Panel*\n\n"
-        "له لاندې انتخاب وکړئ:",
-        reply_markup=admin_menu(),
         parse_mode="Markdown",
     )
 
@@ -210,10 +214,6 @@ async def button_handler(
 
     user = query.from_user
 
-    # --------------------------------------------------------
-    # BAN CHECK
-    # --------------------------------------------------------
-
     if await is_banned(user.id):
 
         await query.message.reply_text(
@@ -228,16 +228,16 @@ async def button_handler(
 
     if query.data == "download":
 
+        context.user_data["waiting_for_url"] = True
+
         await query.message.reply_text(
-            "📥 *Download*\n\n"
-            "خپل مستقیم فایل URL راولېږئ.\n\n"
-            "مثال:\n"
-            "`https://example.com/file.pdf`",
+            "🔗 *Send Video URL*\n\n"
+            "د ویډیو عامه URL راولېږئ.",
             parse_mode="Markdown",
         )
 
     # --------------------------------------------------------
-    # MY FILES
+    # FILES
     # --------------------------------------------------------
 
     elif query.data == "files":
@@ -250,12 +250,12 @@ async def button_handler(
         if not downloads:
 
             await query.message.reply_text(
-                "📁 تر اوسه مو کوم فایل Download کړی نه دی."
+                "📁 تر اوسه Download موجود نه دی."
             )
 
             return
 
-        text = "📁 *Your Recent Downloads*\n\n"
+        text = "📁 *Recent Downloads*\n\n"
 
         for item in downloads:
 
@@ -263,16 +263,17 @@ async def button_handler(
 
             status = item["status"]
 
-            if status == "completed":
-                icon = "✅"
+            icon = (
+                "✅"
+                if status == "completed"
+                else "❌"
+                if status == "failed"
+                else "⏳"
+            )
 
-            elif status == "failed":
-                icon = "❌"
-
-            else:
-                icon = "⏳"
-
-            text += f"{icon} `{filename}`\n"
+            text += (
+                f"{icon} `{filename}`\n"
+            )
 
         await query.message.reply_text(
             text,
@@ -287,11 +288,10 @@ async def button_handler(
 
         await query.message.reply_text(
             "💎 *LinkBox Premium*\n\n"
-            "🚀 Faster processing\n"
-            "📦 Larger file limits\n"
-            "⭐ Higher daily limits\n"
-            "📁 More download history\n\n"
-            "Premium payment system به وروسته اضافه کړو.",
+            "🚀 Higher limits\n"
+            "📦 Larger files\n"
+            "⚡ Priority processing\n\n"
+            "Payment system به وروسته اضافه کړو.",
             parse_mode="Markdown",
         )
 
@@ -301,44 +301,10 @@ async def button_handler(
 
     elif query.data == "language":
 
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    "🇦🇫 پښتو",
-                    callback_data="lang_ps",
-                ),
-                InlineKeyboardButton(
-                    "🇬🇧 English",
-                    callback_data="lang_en",
-                ),
-            ]
-        ]
-
         await query.message.reply_text(
-            "🌐 Select your language:",
-            reply_markup=InlineKeyboardMarkup(
-                keyboard
-            ),
-        )
-
-    # --------------------------------------------------------
-    # PASHTO
-    # --------------------------------------------------------
-
-    elif query.data == "lang_ps":
-
-        await query.message.reply_text(
-            "🇦🇫 ژبه پښتو ته بدله شوه."
-        )
-
-    # --------------------------------------------------------
-    # ENGLISH
-    # --------------------------------------------------------
-
-    elif query.data == "lang_en":
-
-        await query.message.reply_text(
-            "🇬🇧 Language changed to English."
+            "🌐 Language\n\n"
+            "🇦🇫 پښتو\n"
+            "🇬🇧 English"
         )
 
     # --------------------------------------------------------
@@ -349,104 +315,125 @@ async def button_handler(
 
         await query.message.reply_text(
             "ℹ️ *LinkBox Help*\n\n"
-            "1️⃣ Download ته لاړ شئ.\n"
-            "2️⃣ خپل عامه direct file URL راولېږئ.\n"
-            "3️⃣ LinkBox به یې بررسی کړي.\n"
-            "4️⃣ فایل به Telegram ته واستول شي.\n\n"
-            "⚠️ یوازې هغه فایلونه ترلاسه کړئ چې "
-            "د ترلاسه کولو اجازه یې لرئ.",
+            "1️⃣ Download Video ووهئ.\n"
+            "2️⃣ د ویډیو لینک راولېږئ.\n"
+            "3️⃣ کیفیت انتخاب کړئ.\n"
+            "4️⃣ LinkBox به فایل Telegram ته واستوي.\n\n"
+            "⚠️ یوازې هغه content استعمال کړئ "
+            "چې د ترلاسه کولو اجازه یې لرئ.",
             parse_mode="Markdown",
         )
 
     # ========================================================
-    # ADMIN
+    # QUALITY
     # ========================================================
 
-    elif query.data.startswith("admin_"):
+    elif query.data.startswith("quality_"):
 
-        if not is_admin(user.id):
+        quality = query.data.split("_")[1]
+
+        url = context.user_data.get(
+            "video_url"
+        )
+
+        if not url:
 
             await query.message.reply_text(
-                "⛔ Access denied."
+                "❌ Video URL پیدا نه شو. بیا هڅه وکړئ."
             )
 
             return
 
-        # ----------------------------------------------------
-        # STATISTICS
-        # ----------------------------------------------------
+        await query.message.reply_text(
+            f"⏳ Downloading {quality}p...\n\n"
+            "مهرباني وکړئ انتظار وکړئ."
+        )
 
-        if query.data == "admin_stats":
+        download_id = await add_download(
+            user.id,
+            url,
+        )
 
-            stats = await get_statistics()
+        file_path = None
 
-            text = (
-                "📊 *LinkBox Statistics*\n\n"
-                f"👥 Users: {stats['users']}\n"
-                f"📥 Downloads: {stats['downloads']}\n"
-                f"✅ Completed: {stats['completed']}\n"
-                f"💎 Premium: {stats['premium']}"
+        try:
+
+            result = await download_media(
+                url,
+                user.id,
+                quality,
+            )
+
+            file_path = result["path"]
+
+            await update_download(
+                download_id,
+                "completed",
+                result["filename"],
+                result["size"],
+            )
+
+            await increment_download_count(
+                user.id
+            )
+
+            size_mb = (
+                result["size"] /
+                (1024 * 1024)
             )
 
             await query.message.reply_text(
-                text,
-                parse_mode="Markdown",
+                f"✅ Download complete!\n\n"
+                f"🎬 {result['filename']}\n"
+                f"📦 {size_mb:.2f} MB\n\n"
+                "📤 Sending to Telegram..."
             )
 
-        # ----------------------------------------------------
-        # USERS
-        # ----------------------------------------------------
+            with open(
+                file_path,
+                "rb"
+            ) as video_file:
 
-        elif query.data == "admin_users":
+                await query.message.reply_video(
+                    video=video_file,
+                    caption="📦 LinkBox",
+                )
 
-            stats = await get_statistics()
+        except Exception as error:
 
-            await query.message.reply_text(
-                f"👥 Total registered users: "
-                f"{stats['users']}"
+            logger.exception(
+                "Download failed"
             )
 
-        # ----------------------------------------------------
-        # PREMIUM
-        # ----------------------------------------------------
-
-        elif query.data == "admin_premium":
-
-            await query.message.reply_text(
-                "💎 Premium management\n\n"
-                "د Premium management command system "
-                "به بل قدم کې اضافه کړو."
+            await update_download(
+                download_id,
+                "failed",
+                error_message=str(error),
             )
 
-        # ----------------------------------------------------
-        # BAN
-        # ----------------------------------------------------
-
-        elif query.data == "admin_ban":
-
-            context.user_data["admin_action"] = "ban"
-
             await query.message.reply_text(
-                "🚫 د هغه User Telegram ID راولېږئ "
-                "چې Ban کول یې غواړئ."
+                "❌ Download failed.\n\n"
+                "ممکنه ویډیو private وي، "
+                "لینک unsupported وي، یا فایل "
+                "د ټاکلي limit څخه لوی وي."
             )
 
-        # ----------------------------------------------------
-        # UNBAN
-        # ----------------------------------------------------
+        finally:
 
-        elif query.data == "admin_unban":
+            if file_path:
 
-            context.user_data["admin_action"] = "unban"
+                delete_file(
+                    file_path
+                )
 
-            await query.message.reply_text(
-                "✅ د User Telegram ID راولېږئ "
-                "چې Unban کول یې غواړئ."
+            context.user_data.pop(
+                "video_url",
+                None
             )
 
 
 # ============================================================
-# HANDLE TEXT / URL
+# TEXT / URL HANDLER
 # ============================================================
 
 async def handle_message(
@@ -458,10 +445,6 @@ async def handle_message(
 
     await add_user(user)
 
-    # --------------------------------------------------------
-    # BAN CHECK
-    # --------------------------------------------------------
-
     if await is_banned(user.id):
 
         await update.message.reply_text(
@@ -470,68 +453,6 @@ async def handle_message(
 
         return
 
-    # --------------------------------------------------------
-    # ADMIN ACTION
-    # --------------------------------------------------------
-
-    if (
-        is_admin(user.id)
-        and context.user_data.get("admin_action")
-    ):
-
-        action = context.user_data.get(
-            "admin_action"
-        )
-
-        try:
-
-            target_id = int(
-                update.message.text.strip()
-            )
-
-        except ValueError:
-
-            await update.message.reply_text(
-                "❌ Telegram ID باید یوازې عدد وي."
-            )
-
-            return
-
-        if action == "ban":
-
-            await set_banned(
-                target_id,
-                True,
-            )
-
-            await update.message.reply_text(
-                f"🚫 User `{target_id}` banned.",
-                parse_mode="Markdown",
-            )
-
-        elif action == "unban":
-
-            await set_banned(
-                target_id,
-                False,
-            )
-
-            await update.message.reply_text(
-                f"✅ User `{target_id}` unbanned.",
-                parse_mode="Markdown",
-            )
-
-        context.user_data.pop(
-            "admin_action",
-            None,
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # URL
-    # --------------------------------------------------------
-
     url = update.message.text.strip()
 
     if not url.startswith(
@@ -539,113 +460,215 @@ async def handle_message(
     ):
 
         await update.message.reply_text(
-            "🔗 مهرباني وکړئ یو معتبر HTTP/HTTPS "
-            "فایل URL راولېږئ."
+            "🔗 مهرباني وکړئ یو معتبر video URL راولېږئ."
         )
 
         return
 
-    # --------------------------------------------------------
-    # CREATE DOWNLOAD RECORD
-    # --------------------------------------------------------
+    context.user_data["video_url"] = url
 
-    download_id = await add_download(
-        user.id,
-        url,
-    )
-
-    status_message = await update.message.reply_text(
-        "🔎 لینک بررسی کېږي...\n\n"
-        "⏳ مهرباني وکړئ انتظار وکړئ."
+    status = await update.message.reply_text(
+        "🔎 *Checking video...*\n\n"
+        "⏳ معلومات ترلاسه کېږي.",
+        parse_mode="Markdown",
     )
 
     try:
 
-        result = await download_file(
-            url,
-            user.id,
+        info = await get_media_info(
+            url
         )
 
-        await update_download(
-            download_id,
-            "completed",
-            result["filename"],
-            result["size"],
+        title = info.get(
+            "title",
+            "Unknown"
         )
 
-        await increment_download_count(
-            user.id
+        duration = info.get(
+            "duration"
         )
 
-        size_mb = result["size"] / (
-            1024 * 1024
+        uploader = info.get(
+            "uploader"
         )
 
-        await status_message.edit_text(
-            "✅ *Download Complete*\n\n"
-            f"📄 `{result['filename']}`\n"
-            f"📦 {size_mb:.2f} MB\n\n"
-            "📤 فایل Telegram ته لېږل کېږي...",
+        duration_text = "Unknown"
+
+        if duration:
+
+            minutes = int(duration) // 60
+            seconds = int(duration) % 60
+
+            duration_text = (
+                f"{minutes}:{seconds:02d}"
+            )
+
+        text = (
+            "🎬 *Video Found*\n\n"
+            f"📌 Title: `{title[:150]}`\n"
+            f"👤 Creator: `{uploader or 'Unknown'}`\n"
+            f"⏱ Duration: `{duration_text}`\n\n"
+            "👇 Select quality:"
+        )
+
+        await status.edit_text(
+            text,
+            reply_markup=quality_menu(),
             parse_mode="Markdown",
         )
 
-        # ----------------------------------------------------
-        # SEND FILE
-        # ----------------------------------------------------
-
-        try:
-
-            await update.message.reply_document(
-                document=result["path"],
-                caption=(
-                    "📦 *LinkBox*\n"
-                    "✅ Download completed."
-                ),
-                parse_mode="Markdown",
-            )
-
-        except Exception as send_error:
-
-            logger.error(
-                "Telegram file send error: %s",
-                send_error,
-            )
-
-            await update.message.reply_text(
-                "⚠️ فایل Download شو، خو Telegram "
-                "ته د لېږلو پر مهال ستونزه راغله."
-            )
-
-        finally:
-
-            delete_file(
-                result["path"]
-            )
-
-        await status_message.delete()
-
     except Exception as error:
 
-        logger.error(
-            "Download error: %s",
-            error,
+        logger.exception(
+            "Information extraction failed"
         )
 
-        await update_download(
-            download_id,
-            "failed",
-            error_message=str(error),
+        context.user_data.pop(
+            "video_url",
+            None
         )
 
-        await status_message.edit_text(
-            "❌ *Download Failed*\n\n"
-            f"Reason: `{str(error)[:500]}`",
+        await status.edit_text(
+            "❌ *Could not process this URL.*\n\n"
+            "دا لینک ممکن private وي، "
+            "unsupported وي، یا content محدود وي.",
             parse_mode="Markdown",
         )
 
 
 # ============================================================
-# ERROR HANDLER
+# ADMIN BUTTONS
+# ============================================================
+
+async def admin_button_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    query = update.callback_query
+
+    if not is_admin(query.from_user.id):
+
+        await query.answer(
+            "Access denied.",
+            show_alert=True,
+        )
+
+        return
+
+    await query.answer()
+
+    if query.data == "admin_stats":
+
+        stats = await get_statistics()
+
+        await query.message.reply_text(
+            "📊 *Statistics*\n\n"
+            f"👥 Users: {stats['users']}\n"
+            f"📥 Downloads: {stats['downloads']}\n"
+            f"✅ Completed: {stats['completed']}\n"
+            f"💎 Premium: {stats['premium']}",
+            parse_mode="Markdown",
+        )
+
+    elif query.data == "admin_users":
+
+        stats = await get_statistics()
+
+        await query.message.reply_text(
+            f"👥 Total Users: {stats['users']}"
+        )
+
+    elif query.data == "admin_ban":
+
+        context.user_data[
+            "admin_action"
+        ] = "ban"
+
+        await query.message.reply_text(
+            "🚫 د User Telegram ID راولېږئ."
+        )
+
+    elif query.data == "admin_unban":
+
+        context.user_data[
+            "admin_action"
+        ] = "unban"
+
+        await query.message.reply_text(
+            "✅ د User Telegram ID راولېږئ."
+        )
+
+
+# ============================================================
+# ADMIN ID HANDLER
+# ============================================================
+
+async def handle_admin_id(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    user = update.effective_user
+
+    if not is_admin(user.id):
+
+        return
+
+    action = context.user_data.get(
+        "admin_action"
+    )
+
+    if not action:
+
+        return
+
+    try:
+
+        target_id = int(
+            update.message.text.strip()
+        )
+
+    except ValueError:
+
+        await update.message.reply_text(
+            "❌ Telegram ID باید عدد وي."
+        )
+
+        return
+
+    if action == "ban":
+
+        await set_banned(
+            target_id,
+            True,
+        )
+
+        await update.message.reply_text(
+            f"🚫 `{target_id}` banned.",
+            parse_mode="Markdown",
+        )
+
+    elif action == "unban":
+
+        await set_banned(
+            target_id,
+            False,
+        )
+
+        await update.message.reply_text(
+            f"✅ `{target_id}` unbanned.",
+            parse_mode="Markdown",
+        )
+
+    context.user_data.pop(
+        "admin_action",
+        None
+    )
+
+
+# ============================================================
+# ERROR
 # ============================================================
 
 async def error_handler(
@@ -654,13 +677,13 @@ async def error_handler(
 ):
 
     logger.error(
-        "Exception while handling update:",
+        "Unhandled exception:",
         exc_info=context.error,
     )
 
 
 # ============================================================
-# DATABASE INITIALIZATION
+# STARTUP
 # ============================================================
 
 async def post_init(
@@ -670,67 +693,8 @@ async def post_init(
     await init_db()
 
     logger.info(
-        "Database initialized successfully."
+        "Database initialized."
     )
 
 
-# ============================================================
-# MAIN
-# ============================================================
-
-def main():
-
-    if not BOT_TOKEN:
-
-        raise ValueError(
-            "BOT_TOKEN is missing."
-        )
-
-    application = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .post_init(post_init)
-        .build()
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "start",
-            start,
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "admin",
-            admin,
-        )
-    )
-
-    application.add_handler(
-        CallbackQueryHandler(
-            button_handler
-        )
-    )
-
-    application.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            handle_message,
-        )
-    )
-
-    application.add_error_handler(
-        error_handler
-    )
-
-    print("==============================")
-    print("       LinkBox Bot")
-    print("==============================")
-    print("Bot is running...")
-
-    application.run_polling()
-
-
-if __name__ == "__main__":
-    main()
+#
